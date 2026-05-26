@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="佐野クラブ">
+  <meta name="theme-color" content="#0a0e1a">
+  <title>佐野クラブ Stats</title>
+  <link rel="apple-touch-icon" href="icon.png">
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(() => {});
+      });
+    }
+  </script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body, #root { height: 100%; background: #0a0e1a; }
+    body { overscroll-behavior: none; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const DEFAULT_PLAYERS = [
+  { id: 1, uniformNumber: "4",  bibsNumber: "1",  name: "田中", grade: "6年" },
+  { id: 2, uniformNumber: "5",  bibsNumber: "2",  name: "鈴木", grade: "6年" },
+  { id: 3, uniformNumber: "6",  bibsNumber: "3",  name: "佐藤", grade: "5年" },
+  { id: 4, uniformNumber: "7",  bibsNumber: "4",  name: "山田", grade: "5年" },
+  { id: 5, uniformNumber: "8",  bibsNumber: "5",  name: "中村", grade: "6年" },
+  { id: 6, uniformNumber: "9",  bibsNumber: "6",  name: "伊藤", grade: "4年" },
+  { id: 7, uniformNumber: "10", bibsNumber: "7",  name: "渡辺", grade: "5年" },
+  { id: 8, uniformNumber: "11", bibsNumber: "8",  name: "小林", grade: "4年" },
+];
+
+const EMPTY_STATS = () => ({
+  fg2m:0, fg2a:0, fg3m:0, fg3a:0,
+  ftm:0, fta:0, orb:0, drb:0,
+  ast:0, stl:0, blk:0, tov:0, tovRcv:0, pf:0,
+});
+
+const SCREENS = { SETUP:"SETUP", GAME:"GAME", SUMMARY:"SUMMARY", PLAYERS:"PLAYERS" };
+const QUARTERS = ["1Q","2Q","3Q","4Q","OT"];
+const calcPoints = (s) => s.fg2m*2 + s.fg3m*3 + s.ftm;
+const pct = (made, att) => att===0 ? "—" : `${Math.round(made/att*100)}%`;
+
+// localStorage helpers
+const lsGet = (key, def) => { try { const v=localStorage.getItem(key); return v?JSON.parse(v):def; } catch { return def; } };
+const lsSet = (key, val)  => { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} };
+
+function App() {
+  const [screen, setScreen]           = useState(SCREENS.SETUP);
+  const [players, setPlayersRaw]      = useState(() => lsGet("sano_players_v6", DEFAULT_PLAYERS));
+  const [gameHistory, setGameHistRaw] = useState(() => lsGet("sano_hist_v6", []));
+  const [darkMode, setDarkMode]       = useState(true);
+  const [numberMode, setNumberMode]   = useState("uniform");
+  const [saveStatus, setSaveStatus]   = useState("");
+
+  const showSave = (msg) => { setSaveStatus(msg); setTimeout(()=>setSaveStatus(""),2000); };
+
+  const setPlayers = (upd) => setPlayersRaw(prev => {
+    const next = typeof upd==="function" ? upd(prev) : upd;
+    lsSet("sano_players_v6", next); showSave("選手データ保存済み ✓"); return next;
+  });
+  const setGameHistory = (upd) => setGameHistRaw(prev => {
+    const next = typeof upd==="function" ? upd(prev) : upd;
+    lsSet("sano_hist_v6", next); showSave("試合履歴保存済み ✓"); return next;
+  });
+
+  const getNum = useCallback((p) =>
+    numberMode==="bibs" ? (p.bibsNumber||p.uniformNumber) : (p.uniformNumber||p.bibsNumber)
+  , [numberMode]);
+
+  const [gameInfo, setGameInfo]           = useState({ opponent:"", date:new Date().toISOString().slice(0,10), tournament:"", venue:"", category:"ミニバス男子" });
+  const [quarter, setQuarter]             = useState("1Q");
+  const [stats, setStats]                 = useState({});
+  const [oppStats, setOppStats]           = useState({ fg2m:0, fg3m:0, ftm:0, tov:0 });
+  const [log, setLog]                     = useState([]);
+  const [history, setHistory]             = useState([]);
+  const [roster, setRoster]               = useState([]);
+  const [activePlayer, setActivePlayer]   = useState(null);
+  const [gameTimer, setGameTimer]         = useState(0);
+  const [timerRunning, setTimerRunning]   = useState(false);
+  const [quarterScores, setQuarterScores] = useState({});
+  const [feedback, setFeedback]           = useState("");
+  const timerRef = useRef(null);
+
+  useEffect(() => {
+    if (timerRunning) timerRef.current = setInterval(()=>setGameTimer(t=>t+1),1000);
+    else clearInterval(timerRef.current);
+    return () => clearInterval(timerRef.current);
+  }, [timerRunning]);
+
+  const fmtTime = (s) => `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
+  const teamScore = Object.values(stats).reduce((sum,s)=>sum+calcPoints(s),0);
+  const oppScore  = oppStats.fg2m*2 + oppStats.fg3m*3 + oppStats.ftm;
+
+  const startGame = () => {
+    const init={};
+    roster.forEach(id=>{init[id]=EMPTY_STATS();});
+    setStats(init); setOppStats({fg2m:0,fg3m:0,ftm:0,tov:0});
+    setLog([]); setHistory([]); setQuarter("1Q"); setGameTimer(0); setQuarterScores({});
+    setScreen(SCREENS.GAME);
+  };
+
+  const showFeedback = useCallback((msg) => {
+    setFeedback(msg); setTimeout(()=>setFeedback(""),1200);
+  }, []);
+
+  const recordPlay = useCallback((playerId, action, label) => {
+    if (!playerId && action!=="opp") return;
+    setHistory(h=>[...h.slice(-30),{stats:JSON.parse(JSON.stringify(stats)),oppStats:{...oppStats},log:[...log]}]);
+    const ts=fmtTime(gameTimer);
+    if (action==="opp") {
+      const {key,delta}=label;
+      setOppStats(prev=>({...prev,[key]:prev[key]+delta}));
+      setLog(prev=>[...prev,{q:quarter,time:ts,text:`相手 ${label.label}`,type:"opp"}]);
+      showFeedback(`相手 ${label.label}`); return;
+    }
+    const player=players.find(p=>p.id===playerId);
+    const num=player?getNum(player):"?";
+    const name=player?`#${num} ${player.name}`:"?";
+    setStats(prev=>{const s={...prev[playerId]};action(s);return{...prev,[playerId]:s};});
+    setLog(prev=>[...prev,{q:quarter,time:ts,text:`${name} ${label}`,type:"team"}]);
+    showFeedback(`${name} ${label}`);
+  }, [stats,oppStats,log,quarter,gameTimer,players,getNum,showFeedback]);
+
+  const undo = () => {
+    if (history.length===0) return;
+    const prev=history[history.length-1];
+    setStats(prev.stats); setOppStats(prev.oppStats); setLog(prev.log);
+    setHistory(h=>h.slice(0,-1)); showFeedback("↩ 取り消しました");
+  };
+
+  const changeQuarter = (q) => {
+    setQuarterScores(prev=>({...prev,[quarter]:{team:teamScore,opp:oppScore}}));
+    setQuarter(q);
+  };
+
+  const endGame = () => {
+    const finalScores={...quarterScores,[quarter]:{team:teamScore,opp:oppScore}};
+    setQuarterScores(finalScores);
+    const gameData={id:Date.now(),info:{...gameInfo,numberMode},stats:JSON.parse(JSON.stringify(stats)),oppStats:{...oppStats},log:[...log],quarterScores:finalScores,players:roster.map(id=>players.find(p=>p.id===id)),teamScore,oppScore};
+    setGameHistory(prev=>[gameData,...prev.slice(0,19)]);
+    setScreen(SCREENS.SUMMARY);
+  };
+
+  const C = darkMode ? {
+    bg:"#0a0e1a", card:"#111827", card2:"#1a2235", border:"#1e3a5f",
+    text:"#e8f0fe", sub:"#7b9cca", accent:"#f59e0b", green:"#22c55e",
+    red:"#ef4444", blue:"#3b82f6", opp:"#64748b", bibs:"#a78bfa", uniform:"#38bdf8",
+  } : {
+    bg:"#f0f4ff", card:"#ffffff", card2:"#e8eef8", border:"#c5d5ef",
+    text:"#1a2a4a", sub:"#5a7aaa", accent:"#d97706", green:"#16a34a",
+    red:"#dc2626", blue:"#2563eb", opp:"#94a3b8", bibs:"#7c3aed", uniform:"#0284c7",
+  };
+
+  const css = `
+    @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Noto+Sans+JP:wght@400;600;700;900&display=swap');
+    * { box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent; }
+    body { background:${C.bg}; font-family:'Noto Sans JP',sans-serif; color:${C.text}; }
+    ::-webkit-scrollbar{width:4px} ::-webkit-scrollbar-track{background:transparent} ::-webkit-scrollbar-thumb{background:${C.border};border-radius:2px}
+    .bebas{font-family:'Bebas Neue',sans-serif;letter-spacing:.05em}
+    button{cursor:pointer;border:none;outline:none;font-family:'Noto Sans JP',sans-serif;}
+    input,select{font-family:'Noto Sans JP',sans-serif;}
+  `;
+
+  // ── 選手管理 ──────────────────────────────────────
+  if (screen===SCREENS.PLAYERS) {
+    return (
+      <div style={{background:C.bg,minHeight:"100vh",padding:16}}>
+        <style>{css}</style>
+        {saveStatus&&<div style={{position:"fixed",top:12,right:12,background:C.green,color:"#fff",padding:"6px 14px",borderRadius:20,fontSize:12,fontWeight:700,zIndex:999}}>{saveStatus}</div>}
+        <div style={{maxWidth:480,margin:"0 auto"}}>
+          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
+            <button onClick={()=>setScreen(SCREENS.SETUP)} style={{background:C.card,color:C.text,padding:"8px 14px",borderRadius:8,fontSize:14,border:`1px solid ${C.border}`}}>← 戻る</button>
+            <h2 style={{fontSize:20,fontWeight:900}}>選手登録</h2>
+            <div style={{marginLeft:"auto",fontSize:11,color:C.green}}>💾 自動保存</div>
+          </div>
+
+          <div style={{background:C.card,borderRadius:12,padding:"10px 14px",marginBottom:12,border:`1px solid ${C.border}`,display:"flex",gap:16}}>
+            <div style={{display:"flex",alignItems:"center",gap:6}}>
+              <div style={{width:12,height:12,borderRadius:3,background:C.uniform}}/>
+              <span style={{fontSize:12,color:C.sub}}>ユニフォーム番号</span>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:6}}>
+              <div style={{width:12,height:12,borderRadius:3,background:C.bibs}}/>
+              <span style={{fontSize:12,color:C.sub}}>ビブス番号</span>
+            </div>
+          </div>
+
+          {players.map((p,i)=>(
+            <div key={p.id} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 14px",marginBottom:8}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                <div style={{display:"flex",gap:4}}>
+                  <div style={{textAlign:"center"}}>
+                    <div style={{fontSize:9,color:C.uniform,fontWeight:700,marginBottom:2}}>UNI</div>
+                    <div className="bebas" style={{fontSize:26,color:C.uniform,lineHeight:1,minWidth:32,textAlign:"center"}}>{p.uniformNumber||"—"}</div>
+                  </div>
+                  <div style={{fontSize:16,color:C.sub,alignSelf:"center",padding:"0 2px"}}>/</div>
+                  <div style={{textAlign:"center"}}>
+                    <div style={{fontSize:9,color:C.bibs,fontWeight:700,marginBottom:2}}>BIBS</div>
+                    <div className="bebas" style={{fontSize:26,color:C.bibs,lineHeight:1,minWidth:32,textAlign:"center"}}>{p.bibsNumber||"—"}</div>
+                  </div>
+                </div>
+                <div style={{flex:1}}>
+                  <input value={p.name} onChange={e=>setPlayers(prev=>prev.map((x,j)=>j===i?{...x,name:e.target.value}:x))} placeholder="名前" style={{width:"100%",background:C.card2,border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 10px",color:C.text,fontSize:15,fontWeight:700}}/>
+                </div>
+                <select value={p.grade} onChange={e=>setPlayers(prev=>prev.map((x,j)=>j===i?{...x,grade:e.target.value}:x))} style={{background:C.card2,border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 6px",color:C.text,fontSize:13}}>
+                  {["6年","5年","4年","3年","2年","1年"].map(g=><option key={g}>{g}</option>)}
+                </select>
+                <button onClick={()=>setPlayers(prev=>prev.filter((_,j)=>j!==i))} style={{background:"none",color:C.red,fontSize:20,padding:"4px 6px"}}>×</button>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                <div>
+                  <label style={{fontSize:10,color:C.uniform,fontWeight:700,display:"block",marginBottom:3}}>🏅 ユニフォーム番号</label>
+                  <input value={p.uniformNumber||""} onChange={e=>setPlayers(prev=>prev.map((x,j)=>j===i?{...x,uniformNumber:e.target.value}:x))} placeholder="例：5" style={{width:"100%",background:C.card2,border:`2px solid ${C.uniform}44`,borderRadius:6,padding:"7px 10px",color:C.text,fontSize:16,fontWeight:700,textAlign:"center"}}/>
+                </div>
+                <div>
+                  <label style={{fontSize:10,color:C.bibs,fontWeight:700,display:"block",marginBottom:3}}>🎽 ビブス番号</label>
+                  <input value={p.bibsNumber||""} onChange={e=>setPlayers(prev=>prev.map((x,j)=>j===i?{...x,bibsNumber:e.target.value}:x))} placeholder="例：2" style={{width:"100%",background:C.card2,border:`2px solid ${C.bibs}44`,borderRadius:6,padding:"7px 10px",color:C.text,fontSize:16,fontWeight:700,textAlign:"center"}}/>
+                </div>
+              </div>
+            </div>
+          ))}
+
+          <button onClick={()=>setPlayers(prev=>[...prev,{id:Date.now(),uniformNumber:"",bibsNumber:"",name:"",grade:"6年"}])}
+            style={{width:"100%",background:C.accent,color:"#000",padding:12,borderRadius:10,fontWeight:700,fontSize:15,marginTop:8}}>
+            ＋ 選手を追加
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── セットアップ ──────────────────────────────────
+  if (screen===SCREENS.SETUP) {
+    return (
+      <div style={{background:C.bg,minHeight:"100vh",padding:16}}>
+        <style>{css}</style>
+        {saveStatus&&<div style={{position:"fixed",top:12,right:12,background:C.green,color:"#fff",padding:"6px 14px",borderRadius:20,fontSize:12,fontWeight:700,zIndex:999}}>{saveStatus}</div>}
+        <div style={{maxWidth:500,margin:"0 auto"}}>
+
+          <div style={{textAlign:"center",padding:"24px 0 20px"}}>
+            <div className="bebas" style={{fontSize:12,color:C.accent,letterSpacing:4,marginBottom:6}}>SANO CLUB BOYS</div>
+            <div className="bebas" style={{fontSize:42,color:C.text,lineHeight:1}}>STATS APP</div>
+            <div style={{fontSize:11,color:C.sub,marginTop:6}}>佐野クラブ 男子 スタッツ記録</div>
+            <button onClick={()=>setDarkMode(d=>!d)} style={{marginTop:12,background:C.card,color:C.sub,padding:"6px 16px",borderRadius:20,fontSize:12,border:`1px solid ${C.border}`}}>
+              {darkMode?"☀️ ライト":"🌙 ダーク"}
+            </button>
+          </div>
+
+          <div style={{background:C.card,borderRadius:16,padding:16,marginBottom:12,border:`1px solid ${C.border}`}}>
+            <div style={{fontSize:11,color:C.accent,fontWeight:700,letterSpacing:2,marginBottom:12}}>GAME INFO</div>
+            {[["対戦相手","opponent","text","例：板橋クラブ"],["日付","date","date",""],["大会名","tournament","text","例：区長杯"],["会場","venue","text","例：○○体育館"]].map(([label,key,type,ph])=>(
+              <div key={key} style={{marginBottom:10}}>
+                <label style={{fontSize:12,color:C.sub,display:"block",marginBottom:4}}>{label}</label>
+                <input type={type} value={gameInfo[key]} placeholder={ph} onChange={e=>setGameInfo(prev=>({...prev,[key]:e.target.value}))} style={{width:"100%",background:C.card2,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 12px",color:C.text,fontSize:15}}/>
+              </div>
+            ))}
+            <div>
+              <label style={{fontSize:12,color:C.sub,display:"block",marginBottom:4}}>学年カテゴリ</label>
+              <select value={gameInfo.category} onChange={e=>setGameInfo(prev=>({...prev,category:e.target.value}))} style={{width:"100%",background:C.card2,border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 12px",color:C.text,fontSize:15}}>
+                {["ミニバス男子","6年","5年","4年","混合"].map(c=><option key={c}>{c}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div style={{background:C.card,borderRadius:16,padding:16,marginBottom:12,border:`1px solid ${C.border}`}}>
+            <div style={{fontSize:11,color:C.accent,fontWeight:700,letterSpacing:2,marginBottom:12}}>NUMBER MODE</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              <button onClick={()=>setNumberMode("uniform")}
+                style={{background:numberMode==="uniform"?C.uniform+"22":C.card2,border:`2px solid ${numberMode==="uniform"?C.uniform:C.border}`,borderRadius:10,padding:"14px 8px",transition:"all .15s"}}>
+                <div style={{fontSize:22,marginBottom:4}}>🏅</div>
+                <div style={{fontSize:13,fontWeight:700,color:numberMode==="uniform"?C.uniform:C.sub}}>ユニフォーム番号</div>
+                <div style={{fontSize:10,color:C.sub,marginTop:2}}>大会・公式戦</div>
+              </button>
+              <button onClick={()=>setNumberMode("bibs")}
+                style={{background:numberMode==="bibs"?C.bibs+"22":C.card2,border:`2px solid ${numberMode==="bibs"?C.bibs:C.border}`,borderRadius:10,padding:"14px 8px",transition:"all .15s"}}>
+                <div style={{fontSize:22,marginBottom:4}}>🎽</div>
+                <div style={{fontSize:13,fontWeight:700,color:numberMode==="bibs"?C.bibs:C.sub}}>ビブス番号</div>
+                <div style={{fontSize:10,color:C.sub,marginTop:2}}>練習試合・紅白戦</div>
+              </button>
+            </div>
+            <div style={{marginTop:10,background:C.card2,borderRadius:8,padding:"8px 12px",fontSize:12,color:C.sub}}>
+              {numberMode==="uniform"?"🏅 ユニフォーム番号で記録します":"🎽 ビブス番号で記録します"}
+            </div>
+          </div>
+
+          <div style={{background:C.card,borderRadius:16,padding:16,marginBottom:12,border:`1px solid ${C.border}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <div style={{fontSize:11,color:C.accent,fontWeight:700,letterSpacing:2}}>ROSTER</div>
+              <button onClick={()=>setScreen(SCREENS.PLAYERS)} style={{background:C.card2,color:C.sub,padding:"5px 12px",borderRadius:6,fontSize:12,border:`1px solid ${C.border}`}}>選手編集</button>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              {players.map(p=>{
+                const on=roster.includes(p.id);
+                const modeColor=numberMode==="bibs"?C.bibs:C.uniform;
+                const activeNum=getNum(p);
+                const inactiveNum=numberMode==="bibs"?(p.uniformNumber||"—"):(p.bibsNumber||"—");
+                const inactiveLabel=numberMode==="bibs"?"UNI":"BIBS";
+                const inactiveColor=numberMode==="bibs"?C.uniform:C.bibs;
+                return (
+                  <button key={p.id} onClick={()=>setRoster(prev=>on?prev.filter(id=>id!==p.id):[...prev,p.id])}
+                    style={{background:on?modeColor+"22":C.card2,border:`2px solid ${on?modeColor:C.border}`,borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:4,transition:"all .15s",textAlign:"left",position:"relative"}}>
+                    <div style={{display:"flex",alignItems:"baseline",gap:4}}>
+                      <span className="bebas" style={{fontSize:28,color:on?modeColor:C.sub,lineHeight:1}}>#{activeNum}</span>
+                      <span style={{fontSize:13,fontWeight:700,color:on?C.text:C.sub}}>{p.name}</span>
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:4}}>
+                      <span style={{fontSize:9,color:inactiveColor,fontWeight:700,background:inactiveColor+"18",padding:"1px 5px",borderRadius:3}}>{inactiveLabel}</span>
+                      <span style={{fontSize:11,color:C.sub}}>#{inactiveNum}</span>
+                      <span style={{fontSize:10,color:C.sub,marginLeft:2}}>{p.grade}</span>
+                    </div>
+                    {on&&<span style={{position:"absolute",top:8,right:10,fontSize:14,color:modeColor}}>✓</span>}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{marginTop:10,fontSize:12,color:C.sub,textAlign:"center"}}>{roster.length}人選択中</div>
+          </div>
+
+          {gameHistory.length>0&&(
+            <div style={{background:C.card,borderRadius:16,padding:16,marginBottom:12,border:`1px solid ${C.border}`}}>
+              <div style={{fontSize:11,color:C.accent,fontWeight:700,letterSpacing:2,marginBottom:10}}>GAME HISTORY</div>
+              {gameHistory.slice(0,5).map(g=>(
+                <div key={g.id} style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:`1px solid ${C.border}`}}>
+                  <div>
+                    <div style={{fontSize:13,fontWeight:700}}>vs {g.info.opponent||"不明"}</div>
+                    <div style={{fontSize:11,color:C.sub}}>{g.info.date} {g.info.tournament}</div>
+                  </div>
+                  <div className="bebas" style={{fontSize:22,color:g.teamScore>g.oppScore?C.green:C.red}}>{g.teamScore} - {g.oppScore}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <button onClick={startGame} disabled={roster.length===0}
+            style={{width:"100%",background:roster.length>0?C.accent:C.border,color:roster.length>0?"#000":C.sub,padding:16,borderRadius:12,fontWeight:900,fontSize:18,marginBottom:24,transition:"all .2s"}}>
+            🏀 試合開始
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── 試合中 ────────────────────────────────────────
+  if (screen===SCREENS.GAME) {
+    const activePl=players.find(p=>p.id===activePlayer);
+    const modeColor=numberMode==="bibs"?C.bibs:C.uniform;
+    const modeLabel=numberMode==="bibs"?"🎽 ビブス":"🏅 ユニフォーム";
+
+    const playGroups=[
+      {label:"🏀 シュート",color:C.green,actions:[
+        {label:"2P ○",fn:s=>{s.fg2m++;s.fg2a++;}},
+        {label:"2P ×",fn:s=>{s.fg2a++;}},
+        {label:"3P ○",fn:s=>{s.fg3m++;s.fg3a++;}},
+        {label:"3P ×",fn:s=>{s.fg3a++;}},
+        {label:"FT ○",fn:s=>{s.ftm++;s.fta++;}},
+        {label:"FT ×",fn:s=>{s.fta++;}},
+      ]},
+      {label:"📦 REB",color:C.blue,actions:[
+        {label:"OR",fn:s=>{s.orb++;}},
+        {label:"DR",fn:s=>{s.drb++;}},
+      ]},
+      {label:"✨ その他",color:"#a78bfa",actions:[
+        {label:"AS",fn:s=>{s.ast++;}},
+        {label:"ST",fn:s=>{s.stl++;}},
+        {label:"BLK",fn:s=>{s.blk++;}},
+        {label:"TO",fn:s=>{s.tov++;}},
+        {label:"F",fn:s=>{s.pf++;}},
+      ]},
+    ];
+
+    const oppActions=[
+      {label:"2P○",key:"fg2m",delta:1},
+      {label:"3P○",key:"fg3m",delta:1},
+      {label:"FT○",key:"ftm", delta:1},
+      {label:"TO", key:"tov", delta:1},
+    ];
+
+    return (
+      <div style={{background:C.bg,minHeight:"100vh",display:"flex",flexDirection:"column"}}>
+        <style>{css}</style>
+
+        {feedback&&(
+          <div style={{position:"fixed",top:60,left:"50%",transform:"translateX(-50%)",background:C.accent,color:"#000",padding:"8px 20px",borderRadius:20,fontWeight:700,fontSize:14,zIndex:999,pointerEvents:"none",boxShadow:"0 4px 20px #0008"}}>
+            {feedback}
+          </div>
+        )}
+
+        <div style={{background:C.card,borderBottom:`2px solid ${C.accent}`,padding:"10px 16px"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <div style={{textAlign:"center",flex:1}}>
+              <div style={{fontSize:10,color:C.sub,fontWeight:700}}>佐野クラブ</div>
+              <div className="bebas" style={{fontSize:48,color:C.green,lineHeight:1}}>{teamScore}</div>
+            </div>
+            <div style={{textAlign:"center",flex:1}}>
+              <div className="bebas" style={{fontSize:22,color:C.accent}}>{quarter}</div>
+              <button onClick={()=>setTimerRunning(t=>!t)} style={{background:"none",color:C.sub,fontSize:13}}>
+                {timerRunning?"⏸":"▶"} {fmtTime(gameTimer)}
+              </button>
+              <div style={{fontSize:10,color:modeColor,fontWeight:700,marginTop:2}}>{modeLabel}</div>
+            </div>
+            <div style={{textAlign:"center",flex:1}}>
+              <div style={{fontSize:10,color:C.sub,fontWeight:700}}>{gameInfo.opponent||"相手"}</div>
+              <div className="bebas" style={{fontSize:48,color:C.red,lineHeight:1}}>{oppScore}</div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:4,justifyContent:"center",marginTop:6}}>
+            {QUARTERS.map(q=>{
+              const qs=quarterScores[q]; const active=q===quarter;
+              return (
+                <button key={q} onClick={()=>changeQuarter(q)}
+                  style={{background:active?C.accent+"33":"none",border:`1px solid ${active?C.accent:C.border}`,borderRadius:6,padding:"3px 8px",fontSize:11,color:active?C.accent:C.sub,fontWeight:active?700:400}}>
+                  {q} {qs?`${qs.team}-${qs.opp}`:""}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={{padding:"10px 12px 6px",background:C.card2}}>
+          <div style={{fontSize:10,color:modeColor,marginBottom:6,letterSpacing:1,fontWeight:700}}>PLAYER SELECT ({modeLabel})</div>
+          <div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:4}}>
+            {roster.map(id=>{
+              const p=players.find(x=>x.id===id);
+              if(!p) return null;
+              const on=activePlayer===id;
+              const pts=stats[id]?calcPoints(stats[id]):0;
+              const displayNum=getNum(p);
+              return (
+                <button key={id} onClick={()=>setActivePlayer(on?null:id)}
+                  style={{flex:"none",background:on?modeColor:C.card,border:`2px solid ${on?modeColor:C.border}`,borderRadius:12,padding:"8px 12px",minWidth:64,textAlign:"center",transition:"all .12s"}}>
+                  <div className="bebas" style={{fontSize:22,color:on?"#000":C.text}}>#{displayNum}</div>
+                  <div style={{fontSize:11,color:on?"#000":C.sub,fontWeight:600}}>{p.name}</div>
+                  <div style={{fontSize:10,color:on?"#0008":C.accent,fontWeight:700}}>{pts}pts</div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={{flex:1,overflow:"auto",padding:"10px 12px"}}>
+          {activePlayer?(
+            <div>
+              <div style={{fontSize:11,color:modeColor,fontWeight:700,marginBottom:8}}>
+                #{getNum(activePl)} {activePl?.name} にプレイを記録
+              </div>
+              {playGroups.map(group=>(
+                <div key={group.label} style={{marginBottom:12}}>
+                  <div style={{fontSize:11,color:C.sub,marginBottom:6}}>{group.label}</div>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6}}>
+                    {group.actions.map(action=>(
+                      <button key={action.label} onClick={()=>recordPlay(activePlayer,action.fn,action.label)}
+                        style={{background:group.color+"22",border:`1px solid ${group.color}55`,borderRadius:10,padding:"14px 8px",fontWeight:700,fontSize:15,color:group.color,transition:"all .1s"}}
+                        onTouchStart={e=>e.currentTarget.style.opacity="0.6"}
+                        onTouchEnd={e=>e.currentTarget.style.opacity="1"}>
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ):(
+            <div style={{textAlign:"center",padding:"32px 16px",color:C.sub}}>
+              <div style={{fontSize:40,marginBottom:12}}>👆</div>
+              <div style={{fontSize:14,fontWeight:700}}>上の選手ボタンを選択してください</div>
+            </div>
+          )}
+
+          <div style={{background:C.card,borderRadius:12,padding:12,marginTop:4,border:`1px solid ${C.border}`}}>
+            <div style={{fontSize:11,color:C.sub,marginBottom:8}}>相手チーム入力</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
+              {oppActions.map(a=>(
+                <button key={a.key} onClick={()=>recordPlay(null,"opp",a)}
+                  style={{background:C.opp+"22",border:`1px solid ${C.opp}55`,borderRadius:8,padding:"12px 4px",fontWeight:700,fontSize:14,color:C.opp}}>
+                  {a.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{background:C.card,borderRadius:12,padding:12,marginTop:8,border:`1px solid ${C.border}`}}>
+            <div style={{fontSize:11,color:C.sub,marginBottom:8,display:"flex",justifyContent:"space-between"}}>
+              <span>プレイログ</span><span>{log.length}件</span>
+            </div>
+            <div style={{maxHeight:160,overflow:"auto",display:"flex",flexDirection:"column-reverse"}}>
+              {[...log].reverse().map((entry,i)=>(
+                <div key={i} style={{display:"flex",gap:8,padding:"4px 0",borderBottom:`1px solid ${C.border}`,fontSize:13}}>
+                  <span style={{color:C.accent,fontWeight:700,whiteSpace:"nowrap"}}>{entry.q}</span>
+                  <span style={{color:C.sub,whiteSpace:"nowrap"}}>{entry.time}</span>
+                  <span style={{color:entry.type==="opp"?C.red:C.text}}>{entry.text}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div style={{background:C.card,borderTop:`1px solid ${C.border}`,padding:"10px 12px",display:"flex",gap:8}}>
+          <button onClick={undo} disabled={history.length===0}
+            style={{flex:1,background:history.length>0?C.card2:C.border+"44",border:`1px solid ${C.border}`,borderRadius:10,padding:12,fontSize:14,fontWeight:700,color:history.length>0?C.text:C.sub}}>
+            ↩ Undo
+          </button>
+          <button onClick={()=>setScreen(SCREENS.SETUP)}
+            style={{flex:1,background:C.card2,border:`1px solid ${C.border}`,borderRadius:10,padding:12,fontSize:14,fontWeight:700,color:C.sub}}>
+            ← 戻る
+          </button>
+          <button onClick={endGame}
+            style={{flex:2,background:C.accent,border:"none",borderRadius:10,padding:12,fontSize:14,fontWeight:900,color:"#000"}}>
+            試合終了 →
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── サマリー ─────────────────────────────────────
+  if (screen===SCREENS.SUMMARY) {
+    const rosterPlayers=roster.map(id=>players.find(p=>p.id===id)).filter(Boolean);
+    const teamStats=Object.values(stats).reduce((acc,s)=>{Object.keys(s).forEach(k=>{acc[k]=(acc[k]||0)+s[k];});return acc;},{});
+    const qData=QUARTERS.filter(q=>quarterScores[q]).map(q=>({q,team:quarterScores[q]?.team||0,opp:quarterScores[q]?.opp||0}));
+    const scorers=rosterPlayers.map(p=>({player:p,pts:stats[p.id]?calcPoints(stats[p.id]):0,stats:stats[p.id]||EMPTY_STATS()})).sort((a,b)=>b.pts-a.pts);
+    const mc=numberMode==="bibs"?C.bibs:C.uniform;
+
+    return (
+      <div style={{background:C.bg,minHeight:"100vh",padding:16}}>
+        <style>{css}</style>
+        <div style={{maxWidth:500,margin:"0 auto"}}>
+
+          <div style={{background:C.card,borderRadius:16,padding:20,marginBottom:12,border:`1px solid ${C.border}`,textAlign:"center"}}>
+            <div style={{fontSize:12,color:C.sub,marginBottom:4}}>{gameInfo.date} {gameInfo.tournament} {gameInfo.venue}</div>
+            <div style={{fontSize:14,fontWeight:700,marginBottom:16}}>佐野クラブ vs {gameInfo.opponent||"相手"}</div>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:16}}>
+              <div><div style={{fontSize:11,color:C.sub}}>佐野クラブ</div><div className="bebas" style={{fontSize:72,color:teamScore>=oppScore?C.green:C.text,lineHeight:1}}>{teamScore}</div></div>
+              <div className="bebas" style={{fontSize:32,color:C.sub}}>-</div>
+              <div><div style={{fontSize:11,color:C.sub}}>{gameInfo.opponent||"相手"}</div><div className="bebas" style={{fontSize:72,color:oppScore>teamScore?C.green:C.text,lineHeight:1}}>{oppScore}</div></div>
+            </div>
+            <div style={{marginTop:8,padding:"6px 20px",background:teamScore>oppScore?C.green+"22":teamScore<oppScore?C.red+"22":C.opp+"22",borderRadius:20,display:"inline-block",fontSize:14,fontWeight:700,color:teamScore>oppScore?C.green:teamScore<oppScore?C.red:C.sub}}>
+              {teamScore>oppScore?"🏆 WIN":teamScore<oppScore?"😤 LOSE":"🤝 DRAW"}
+            </div>
+          </div>
+
+          {qData.length>0&&(
+            <div style={{background:C.card,borderRadius:16,padding:16,marginBottom:12,border:`1px solid ${C.border}`}}>
+              <div style={{fontSize:11,color:C.accent,fontWeight:700,letterSpacing:2,marginBottom:12}}>Q SCORES</div>
+              <div style={{display:"grid",gridTemplateColumns:`repeat(${qData.length+1},1fr)`,gap:4,textAlign:"center"}}>
+                <div/>{qData.map(d=><div key={d.q} style={{fontSize:11,color:C.sub,fontWeight:700}}>{d.q}</div>)}
+                <div style={{fontSize:11,color:C.sub,fontWeight:700}}>計</div>
+                <div style={{fontSize:11,fontWeight:700,color:C.green}}>佐野</div>
+                {qData.map(d=>{const prev=qData[qData.indexOf(d)-1]?.team||0;return<div key={d.q} style={{fontSize:15,fontWeight:700,color:C.text}}>{d.team-prev}</div>;})}
+                <div style={{fontSize:15,fontWeight:900,color:C.green}}>{teamScore}</div>
+                <div style={{fontSize:11,fontWeight:700,color:C.red}}>{gameInfo.opponent||"相手"}</div>
+                {qData.map(d=>{const prev=qData[qData.indexOf(d)-1]?.opp||0;return<div key={d.q} style={{fontSize:15,fontWeight:700,color:C.text}}>{d.opp-prev}</div>;})}
+                <div style={{fontSize:15,fontWeight:900,color:C.red}}>{oppScore}</div>
+              </div>
+            </div>
+          )}
+
+          <div style={{background:C.card,borderRadius:16,padding:16,marginBottom:12,border:`1px solid ${C.border}`}}>
+            <div style={{fontSize:11,color:C.accent,fontWeight:700,letterSpacing:2,marginBottom:12}}>TEAM STATS</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+              {[["FG",`${teamStats.fg2m+teamStats.fg3m}/${teamStats.fg2a+teamStats.fg3a}`,pct(teamStats.fg2m+teamStats.fg3m,teamStats.fg2a+teamStats.fg3a)],["3P",`${teamStats.fg3m}/${teamStats.fg3a}`,pct(teamStats.fg3m,teamStats.fg3a)],["FT",`${teamStats.ftm}/${teamStats.fta}`,pct(teamStats.ftm,teamStats.fta)],["OR",teamStats.orb||0,""],["DR",teamStats.drb||0,""],["REB",(teamStats.orb||0)+(teamStats.drb||0),""],["AS",teamStats.ast||0,""],["ST",teamStats.stl||0,""],["BLK",teamStats.blk||0,""],["TO",teamStats.tov||0,""],["F",teamStats.pf||0,""]].map(([label,val,sub])=>(
+                <div key={label} style={{background:C.card2,borderRadius:8,padding:"10px 8px",textAlign:"center"}}>
+                  <div style={{fontSize:10,color:C.sub,marginBottom:2}}>{label}</div>
+                  <div style={{fontSize:18,fontWeight:900,color:C.text}}>{val}</div>
+                  {sub&&<div style={{fontSize:10,color:C.accent,fontWeight:700}}>{sub}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{background:C.card,borderRadius:16,padding:16,marginBottom:12,border:`1px solid ${C.border}`}}>
+            <div style={{fontSize:11,color:C.accent,fontWeight:700,letterSpacing:2,marginBottom:12}}>INDIVIDUAL STATS</div>
+            <div style={{overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:400}}>
+                <thead><tr style={{borderBottom:`1px solid ${C.border}`}}>{["選手","PTS","FG%","3P%","FT%","REB","OR","DR","AS","ST","TO","F"].map(h=><th key={h} style={{padding:"6px 4px",color:C.sub,textAlign:"center",whiteSpace:"nowrap",fontSize:10}}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {scorers.map(({player:p,pts,stats:s})=>(
+                    <tr key={p.id} style={{borderBottom:`1px solid ${C.border}44`}}>
+                      <td style={{padding:"8px 4px",whiteSpace:"nowrap"}}><span className="bebas" style={{color:mc,marginRight:4}}>#{getNum(p)}</span><span style={{fontSize:11}}>{p.name}</span></td>
+                      <td style={{textAlign:"center",fontWeight:900,color:pts>0?C.text:C.sub}}>{pts}</td>
+                      <td style={{textAlign:"center",color:C.sub}}>{pct(s.fg2m+s.fg3m,s.fg2a+s.fg3a)}</td>
+                      <td style={{textAlign:"center",color:C.sub}}>{pct(s.fg3m,s.fg3a)}</td>
+                      <td style={{textAlign:"center",color:C.sub}}>{pct(s.ftm,s.fta)}</td>
+                      <td style={{textAlign:"center"}}>{s.orb+s.drb}</td>
+                      <td style={{textAlign:"center",color:C.sub}}>{s.orb}</td>
+                      <td style={{textAlign:"center",color:C.sub}}>{s.drb}</td>
+                      <td style={{textAlign:"center"}}>{s.ast}</td>
+                      <td style={{textAlign:"center"}}>{s.stl}</td>
+                      <td style={{textAlign:"center",color:s.tov>2?C.red:C.sub}}>{s.tov}</td>
+                      <td style={{textAlign:"center",color:s.pf>=4?C.red:C.sub}}>{s.pf}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style={{background:C.card,borderRadius:16,padding:16,marginBottom:12,border:`1px solid ${C.border}`}}>
+            <div style={{fontSize:11,color:C.accent,fontWeight:700,letterSpacing:2,marginBottom:12}}>GAME LOG ({log.length}件)</div>
+            <div style={{maxHeight:240,overflow:"auto"}}>
+              {log.map((entry,i)=>(
+                <div key={i} style={{display:"flex",gap:8,padding:"5px 0",borderBottom:`1px solid ${C.border}33`,fontSize:13}}>
+                  <span style={{color:C.accent,fontWeight:700,width:24}}>{entry.q}</span>
+                  <span style={{color:C.sub,width:44}}>{entry.time}</span>
+                  <span style={{color:entry.type==="opp"?C.red:C.text}}>{entry.text}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:24}}>
+            <button onClick={()=>setScreen(SCREENS.SETUP)} style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:14,fontWeight:700,fontSize:14,color:C.text}}>🏠 ホームへ</button>
+            <button onClick={()=>{
+              const text=`佐野クラブ ${teamScore} - ${oppScore} ${gameInfo.opponent||"相手"}\n${gameInfo.date} ${gameInfo.tournament}\n\n個人成績\n`+scorers.map(({player:p,pts,stats:s})=>`#${getNum(p)}${p.name}: ${pts}pts REB${s.orb+s.drb} AS${s.ast} ST${s.stl} TO${s.tov}`).join("\n");
+              navigator.clipboard?.writeText(text).then(()=>showFeedback("📋 コピーしました！"));
+            }} style={{background:C.accent,border:"none",borderRadius:10,padding:14,fontWeight:700,fontSize:14,color:"#000"}}>📋 結果コピー</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App/>);
+  </script>
+</body>
+</html>
