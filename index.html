@@ -549,7 +549,7 @@ function App() {
                   <div className="bebas" style={{fontSize:22,color:on?"#000":C.text}}>#{getNum(p)}</div>
                   <div style={{fontSize:11,color:on?"#000":C.sub,fontWeight:600}}>{p.name}</div>
                   <div style={{fontSize:10,color:on?"#0008":C.accent,fontWeight:700}}>{pts}pts</div>
-                  {pf>=4&&<div style={{position:"absolute",top:2,right:4,fontSize:9,color:C.red,fontWeight:700}}>F{pf}</div>}
+                  <div style={{fontSize:10,color:pf>=4?C.red:(on?"#0008":C.sub),fontWeight:pf>=4?900:600}}>F{pf}</div>
                 </button>
               );
             })}
